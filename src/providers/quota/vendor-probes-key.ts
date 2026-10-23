@@ -1053,14 +1053,18 @@ async function fetchNeuralwattQuota(provider: string, config: OcxProviderConfig)
 /**
  * Abliteration `GET /v1/credits` body: `{ data: { total_credits, total_usage } }`, both in USD.
  * `total_credits` is everything granted or purchased and `total_usage` is finalized spend, so the
- * balance is their difference. An account with no credits has no ceiling to meter against and
- * produces no row rather than a fabricated empty or exhausted bar.
+ * balance is their difference. A well-formed reply with zero total credits is authoritative: it has
+ * no ceiling to meter against, so it clears any previous row instead of fabricating a bar. A
+ * malformed reply returns null and leaves the last-good row in place.
  */
-export function parseAbliterationCredits(body: Record<string, unknown> | null): ProviderQuota | null {
+export function parseAbliterationCredits(
+  body: Record<string, unknown> | null,
+): ProviderQuota | typeof AUTHORITATIVE_EMPTY_QUOTA | null {
   const data = asRecord(body?.data);
   const total = toFiniteNumber(data?.total_credits);
   const used = toFiniteNumber(data?.total_usage);
-  if (total === undefined || used === undefined || total <= 0 || used < 0) return null;
+  if (total === undefined || used === undefined || total < 0 || used < 0) return null;
+  if (total === 0) return AUTHORITATIVE_EMPTY_QUOTA;
   const percent = normalizePercent((used / total) * 100);
   if (percent === undefined) return null;
   return {
@@ -1092,7 +1096,8 @@ async function fetchAbliterationQuota(provider: string, config: OcxProviderConfi
   const raw = await readQuotaJson(response);
   if (raw === QUOTA_JSON_READ_FAILURE) return null;
   const quota = parseAbliterationCredits(asRecord(raw));
-  return quota ? keyReport(provider, "abliteration:credits", quota, config, apiKey, quota) : null;
+  if (quota === null || quota === AUTHORITATIVE_EMPTY_QUOTA) return quota;
+  return keyReport(provider, "abliteration:credits", quota, config, apiKey, quota);
 }
 
 

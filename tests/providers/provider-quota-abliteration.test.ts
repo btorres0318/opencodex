@@ -14,6 +14,7 @@ import {
   setProviderQuotaBeforePublishForTests,
 } from "../../src/providers/quota";
 import { parseAbliterationCredits } from "../../src/providers/quota/vendor-probes-key";
+import { AUTHORITATIVE_EMPTY_QUOTA } from "../../src/providers/quota/report-cache";
 import type { OcxConfig, OcxProviderConfig } from "../../src/types";
 
 const originalFetch = globalThis.fetch;
@@ -134,15 +135,42 @@ describe("abliteration credits quota probe", () => {
   });
 
   test("spent-out balances clamp to zero remaining at 100 percent", () => {
-    expect(parseAbliterationCredits({ data: { total_credits: 5, total_usage: 5.2 } })?.creditsUsd)
+    const quota = parseAbliterationCredits({ data: { total_credits: 5, total_usage: 5.2 } });
+    expect(quota !== null && quota !== AUTHORITATIVE_EMPTY_QUOTA ? quota.creditsUsd : undefined)
       .toMatchObject({ used: 5.2, limit: 5, remaining: 0, percent: 100 });
   });
 
-  test("no credits or a malformed body produces no meter", () => {
-    expect(parseAbliterationCredits({ data: { total_credits: 0, total_usage: 0 } })).toBeNull();
+  test("a well-formed zero-credit reply is authoritative; a malformed body is not", () => {
+    expect(parseAbliterationCredits({ data: { total_credits: 0, total_usage: 0 } })).toBe(AUTHORITATIVE_EMPTY_QUOTA);
+    expect(parseAbliterationCredits({ data: { total_credits: -1, total_usage: 0 } })).toBeNull();
     expect(parseAbliterationCredits({ data: { total_credits: 10, total_usage: -1 } })).toBeNull();
     expect(parseAbliterationCredits({ data: { total_credits: "10", total_usage: null } })).toBeNull();
     expect(parseAbliterationCredits({ total_credits: 10, total_usage: 1 })).toBeNull();
     expect(parseAbliterationCredits(null)).toBeNull();
+  });
+
+  test("a positive balance followed by zero total credits clears the last-good row", async () => {
+    let emptied = false;
+    globalThis.fetch = (async () => emptied ? creditsResponse(0, 0) : creditsResponse(20, 5)) as typeof fetch;
+    const config = keyQuotaConfig("abliteration", "https://api.abliteration.ai/v1");
+
+    const valid = await fetchProviderQuotaReports(config, true);
+    emptied = true;
+    const cleared = await fetchProviderQuotaReports(config, true);
+
+    expect(valid.reports).toHaveLength(1);
+    expect(cleared.reports).toEqual([]);
+  });
+
+  test("a malformed successful reply keeps the last-good row", async () => {
+    let malformed = false;
+    globalThis.fetch = (async () => malformed ? Response.json({ data: {} }) : creditsResponse(20, 5)) as typeof fetch;
+    const config = keyQuotaConfig("abliteration", "https://api.abliteration.ai/v1");
+
+    const valid = await fetchProviderQuotaReports(config, true);
+    malformed = true;
+    const retried = await fetchProviderQuotaReports(config, true);
+
+    expect(retried.reports).toEqual(valid.reports);
   });
 });
